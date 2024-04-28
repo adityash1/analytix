@@ -1,0 +1,16 @@
+{
+  "name": "event-tracker",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "http-server",
+    "build": "rm -rf static/track* && esbuild --bundle --minify --global-name=_goTracker --format=iife --outfile=static/track.js src/track.ts"
+  },
+  "devDependencies": { "http-server": "^14.1.1" },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "esbuild": "^0.20.2"
+  }
+}

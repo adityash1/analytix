@@ -27,6 +27,11 @@ class Tracker {
     };
     this.trackRequest(payload);
   }
+
+  page(path: string) {
+    this.track(path, "Page views");
+  }
+
   private trackRequest(payload: TrackPayload) {
     const s = JSON.stringify(payload);
     const url = `http://localhost:9876/track?data=${btoa(s)}`;
@@ -36,6 +41,32 @@ class Tracker {
   }
 }
 ((w, d) => {
-  w._got = new Tracker();
-  console.log("tracker loaded");
+  const path = w.location.pathname;
+
+  let tracker = new Tracker();
+
+  w._got = w._got || tracker;
+
+  tracker.page(path);
+
+  const his = window.history;
+  if (his.pushState) {
+    const originalFn = his["pushState"];
+    his.pushState = function () {
+      originalFn.apply(this, arguments);
+      tracker.page(w.location.pathname);
+    };
+
+    window.addEventListener("popstate", () => {
+      tracker.page(w.location.pathname);
+    });
+  }
+
+  w.addEventListener(
+    "hashchange",
+    () => {
+      tracker.page(d.location.hash);
+    },
+    false,
+  );
 })(window, document);

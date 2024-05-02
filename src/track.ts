@@ -13,17 +13,50 @@ interface TrackPayload {
 }
 
 class Tracker {
+  private id: string = "";
+  private siteId: string = "";
+  private referrer: string = "";
+
+  constructor(siteId: string, ref: string) {
+    this.siteId = siteId;
+    this.referrer = ref;
+
+    const customId = this.getSession("id");
+    if (customId) {
+      this.id = customId;
+    }
+  }
+
+  private getSession(key) {
+    key = `__got_${key}__`;
+
+    const s = localStorage.getItem(key);
+    if (!s) return null;
+    return JSON.parse(s);
+  }
+
+  private setSession(key: string, value: any) {
+    key = `__got_${key}__`;
+
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  identify(customId: string) {
+    this.id = customId;
+    this.setSession("id", customId);
+  }
+
   track(event: string, category: string) {
     const payload: TrackPayload = {
       tracking: {
-        type: "event",
-        identity: "todo-id",
+        type: category == "Page views" ? "page" : "event",
+        identity: this.id,
         ua: navigator.userAgent,
         event: event,
         category: category,
-        referrer: "todo-referrer",
+        referrer: this.referrer,
       },
-      site_id: "todo-site-id",
+      site_id: this.siteId,
     };
     this.trackRequest(payload);
   }
@@ -41,9 +74,21 @@ class Tracker {
   }
 }
 ((w, d) => {
+  const ds = d.currentScript?.dataset;
+  if (!ds || !ds.siteid) {
+    console.error("you must have a data-siteid in your script tag.");
+    return;
+  }
+
   const path = w.location.pathname;
 
-  let tracker = new Tracker();
+  let externalReferrer = "";
+  const ref = d.referrer;
+  if (ref && ref.indexOf(`${w.location.protocol}//${w.location.host}`) == 0) {
+    externalReferrer = ref;
+  }
+
+  let tracker = new Tracker(ds.siteid, externalReferrer);
 
   w._got = w._got || tracker;
 

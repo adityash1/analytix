@@ -2,11 +2,23 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+
+	"github.com/mileusna/useragent"
+)
+
+var (
+	events *Events = NewEvents()
 )
 
 func main() {
+	if err := events.Open(); err != nil {
+		log.Fatal(err)
+	}
+
 	http.HandleFunc("/track", track)
 	http.ListenAndServe(":9876", nil)
 }
@@ -19,9 +31,19 @@ func track(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmt.Print(err)
 	}
-	fmt.Println("site id", trk)
+
+	ua := useragent.Parse(trk.Action.UserAgent)
+	if err := events.Add(trk, ua); err != nil {
+		fmt.Println(err)
+	}
 }
 
-func decodeData(s string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(s)
+func decodeData(s string) (data Tracking, err error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return
+	}
+
+	err = json.Unmarshal(b, &data)
+	return
 }

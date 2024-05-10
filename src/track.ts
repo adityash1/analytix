@@ -5,6 +5,7 @@ interface TrackingData {
   event: string;
   category: string;
   referrer: string;
+  isTouchDevice: boolean;
 }
 
 interface TrackPayload {
@@ -16,10 +17,12 @@ class Tracker {
   private id: string = "";
   private siteId: string = "";
   private referrer: string = "";
+  private isTouch = false;
 
   constructor(siteId: string, ref: string) {
     this.siteId = siteId;
     this.referrer = ref;
+    this.isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
 
     const customId = this.getSession("id");
     if (customId) {
@@ -55,6 +58,7 @@ class Tracker {
         event: event,
         category: category,
         referrer: this.referrer,
+        isTouchDevice: this.isTouch,
       },
       site_id: this.siteId,
     };

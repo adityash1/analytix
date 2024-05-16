@@ -15,3 +15,14 @@ type Tracking struct {
 	SiteID string       `json:"site_id"`
 	Action TrackingData `json:"tracking"`
 }
+
+type GeoInfo struct {
+	IP         string  `json:"ip"`
+	Country    string  `json:"country"`
+	CountryISO string  `json:"country_iso"`
+	RegionName string  `json:"region_name"`
+	RegionCode string  `json:"region_code"`
+	City       string  `json:"city"`
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+}

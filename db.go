@@ -49,7 +49,7 @@ func (e *Events) Open() error {
 	return nil
 }
 
-func (e *Events) Add(trk Tracking, ua useragent.UserAgent) error {
+func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
 	qry := `
 		INSERT INTO events
 		(
@@ -83,8 +83,8 @@ func (e *Events) Add(trk Tracking, ua useragent.UserAgent) error {
 		ua.Name,
 		ua.OS,
 		ua.Device,
-		"todo-country",
-		"todo-region",
+		geo.Country,
+		geo.RegionName,
 	)
 
 	return err

@@ -34,7 +34,8 @@ func track(w http.ResponseWriter, r *http.Request) {
 
 	ua := useragent.Parse(trk.Action.UserAgent)
 
-	ip, err := ipFromRequest(nil, r)
+	headers := []string{"X-Forwarded-For", "X-Real-IP"}
+	ip, err := ipFromRequest(headers, r)
 	if err != nil {
 		fmt.Println("error getting IP: ", err)
 		return

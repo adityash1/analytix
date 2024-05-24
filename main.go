@@ -26,6 +26,8 @@ func main() {
 		log.Fatal(err)
 	}
 
+	go events.Run()
+
 	http.HandleFunc("/track", track)
 	http.ListenAndServe(":9876", nil)
 }
@@ -54,9 +56,7 @@ func track(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := events.Add(trk, ua, geoInfo); err != nil {
-		fmt.Println(err)
-	}
+	go events.Add(trk, ua, geoInfo)
 }
 
 func decodeData(s string) (data Tracking, err error) {

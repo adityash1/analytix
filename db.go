@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -10,8 +11,17 @@ import (
 	"github.com/mileusna/useragent"
 )
 
+type qdata struct {
+	trk Tracking
+	ua  useragent.UserAgent
+	geo *GeoInfo
+}
+
 type Events struct {
-	DB driver.Conn
+	DB   driver.Conn
+	ch   chan qdata
+	lock sync.RWMutex
+	q    []qdata
 }
 
 func NewEvents() *Events {
@@ -116,7 +126,20 @@ func (e *Events) EnsureTable() error {
 	return e.DB.Exec(ctx, qry)
 }
 
-func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
+func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) {
+	e.ch <- qdata{trk, ua, geo}
+}
+
+func (e *Events) Insert() error {
+	var tmp []qdata
+	e.lock.Lock()
+	for _, qd := range e.q {
+		tmp = append(tmp, qd)
+	}
+
+	e.q = nil
+	e.lock.Unlock()
+
 	qry := `
 		INSERT INTO events
 		(
@@ -139,21 +162,64 @@ func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
 	`
 
 	ctx := context.Background()
-	err := e.DB.Exec(ctx, qry,
-		trk.SiteID,
-		nowToInt(),
-		trk.Action.Type,
-		trk.Action.Identity,
-		trk.Action.Event,
-		trk.Action.Category,
-		trk.Action.Referrer,
-		trk.Action.IsTouchDevice,
-		ua.Name,
-		ua.OS,
-		ua.Device,
-		geo.Country,
-		geo.RegionName,
-	)
+	batch, err := e.DB.PrepareBatch(ctx, qry)
+	if err != nil {
+		return err
+	}
 
-	return err
+	for _, qd := range tmp {
+		err := batch.Append(
+			qd.trk.SiteID,
+			nowToInt(),
+			qd.trk.Action.Type,
+			qd.trk.Action.Identity,
+			qd.trk.Action.Event,
+			qd.trk.Action.Category,
+			qd.trk.Action.Referrer,
+			qd.trk.Action.IsTouchDevice,
+			qd.ua.Name,
+			qd.ua.OS,
+			qd.ua.Device,
+			qd.geo.Country,
+			qd.geo.RegionName,
+		)
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return batch.Send()
+}
+
+func (e *Events) Run() {
+	timer := time.NewTimer(time.Second * 10)
+	for {
+		select {
+		case data := <-e.ch:
+			e.lock.Lock()
+			e.q = append(e.q, data)
+			c := len(e.q)
+			e.lock.Unlock()
+
+			if c >= 15 {
+				if err := e.Insert(); err != nil {
+					fmt.Println("error while inserting data: ", err)
+				}
+			}
+
+		case <-timer.C:
+			timer.Reset(time.Second * 10)
+
+			e.lock.RLock()
+			c := len(e.q)
+			e.lock.RUnlock()
+
+			if c > 0 {
+				if err := e.Insert(); err != nil {
+					fmt.Println("error while inserting data: ", err)
+				}
+			}
+		}
+	}
 }

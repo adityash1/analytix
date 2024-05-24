@@ -2,14 +2,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/mileusna/useragent"
 )
 
 type Events struct {
-	DB *pgx.Conn
+	DB driver.Conn
 }
 
 func NewEvents() *Events {
@@ -35,18 +37,83 @@ type Event struct {
 }
 
 func (e *Events) Open() error {
-	conn, err := pgx.Connect(
-		context.Background(),
-		"postgres://postgres:password@localhost:5432/postgres",
-	)
+	ctx := context.Background()
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{"127.0.0.1:9000"},
+		Auth: clickhouse.Auth{
+			Database: "default",
+			Username: "default",
+			Password: "",
+		},
+		ClientInfo: clickhouse.ClientInfo{
+			Products: []struct {
+				Name    string
+				Version string
+			}{
+				{Name: "an-example-go-client", Version: "0.1"},
+			},
+		},
+
+		Debug: false,
+		Settings: clickhouse.Settings{
+			"max_execution_time": 60,
+		},
+		Compression: &clickhouse.Compression{
+			Method: clickhouse.CompressionLZ4,
+		},
+		DialTimeout:          time.Second * 30,
+		MaxOpenConns:         5,
+		MaxIdleConns:         5,
+		ConnMaxLifetime:      time.Duration(10) * time.Minute,
+		ConnOpenStrategy:     clickhouse.ConnOpenInOrder,
+		BlockBufferSize:      10,
+		MaxCompressionBuffer: 10240,
+		Debugf: func(format string, v ...interface{}) {
+			fmt.Printf(format, v)
+		},
+		// TLS: &tls.Config{
+		// 	InsecureSkipVerify: true,
+		// },
+	})
+
 	if err != nil {
-		return err
-	} else if err := conn.Ping(context.Background()); err != nil {
 		return err
 	}
 
+	if err := conn.Ping(ctx); err != nil {
+		if exception, ok := err.(*clickhouse.Exception); ok {
+			fmt.Printf("Exception [%d] %s \n%s\n", exception.Code, exception.Message, exception.StackTrace)
+		}
+		return err
+	}
 	e.DB = conn
 	return nil
+}
+
+func (e *Events) EnsureTable() error {
+	qry := `
+		CREATE TABLE IF NOT EXISTS events (
+			site_id String NOT NULL,
+			occured_at UInt32 NOT NULL,
+			type String NOT NULL,
+			user_id String NOT NULL,
+			event String NOT NULL,
+			category String NOT NULL,
+			referrer String NOT NULL,
+			is_touch BOOLEAN NOT NULL,
+			browser_name String NOT NULL,
+			os_name String NOT NULL,
+			device_type String NOT NULL,
+			country String NOT NULL,
+			region String NOT NULL,
+			timestamp DateTime DEFAULT now()
+		)
+		ENGINE MergeTree
+		ORDER BY (site_id, occured_at);
+	`
+
+	ctx := context.Background()
+	return e.DB.Exec(ctx, qry)
 }
 
 func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
@@ -71,7 +138,8 @@ func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
 		)
 	`
 
-	_, err := e.DB.Exec(context.Background(), qry,
+	ctx := context.Background()
+	err := e.DB.Exec(ctx, qry,
 		trk.SiteID,
 		nowToInt(),
 		trk.Action.Type,

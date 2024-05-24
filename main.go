@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,11 +12,17 @@ import (
 )
 
 var (
-	events *Events = NewEvents()
+	events  *Events = NewEvents()
+	forceIP string
 )
 
 func main() {
+	flag.StringVar(&forceIP, "ip", "", "force IP for request, useful in local")
+	flag.Parse()
+
 	if err := events.Open(); err != nil {
+		log.Fatal(err)
+	} else if err := events.EnsureTable(); err != nil {
 		log.Fatal(err)
 	}
 

@@ -27,6 +27,8 @@ func getGeoInfo(ip string) (*GeoInfo, error) {
 }
 
 func ipFromRequest(headers []string, r *http.Request) (net.IP, error) {
+	// try to get IP from HTTP headers
+	// if nothing, get the RemoteAddr
 	remoteIP := ""
 	for _, header := range headers {
 		remoteIP = r.Header.Get(header)
@@ -46,6 +48,9 @@ func ipFromRequest(headers []string, r *http.Request) (net.IP, error) {
 		remoteIP = host
 	}
 
+	if len(forceIP) > 0 {
+		remoteIP = forceIP
+	}
 	ip := net.ParseIP(remoteIP)
 	if ip == nil {
 		return nil, fmt.Errorf("could not parse IP: %s", remoteIP)

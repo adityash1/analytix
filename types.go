@@ -1,4 +1,4 @@
-package main
+package tracker
 
 type TrackingData struct {
 	Type          string `json:"type"`
@@ -7,7 +7,8 @@ type TrackingData struct {
 	Event         string `json:"event"`
 	Category      string `json:"category"`
 	Referrer      string `json:"referrer"`
-	IsTouchDevice bool   `json:"isTouchDevice"`
+	ReferrerHost  string
+	IsTouchDevice bool `json:"isTouchDevice"`
 	OccuredAt     uint32
 }
 
@@ -25,4 +26,18 @@ type GeoInfo struct {
 	City       string  `json:"city"`
 	Latitude   float64 `json:"latitude"`
 	Longitude  float64 `json:"longitude"`
+}
+
+type Metric struct {
+	OccuredAt uint32 `json:"occuredAt"`
+	Value     string `json:"value"`
+	Count     uint64 `json:"count"`
+}
+
+type MetricData struct {
+	What   QueryType `json:"what"`
+	SiteID string    `json:"siteId"`
+	Start  uint32    `json:"start"`
+	End    uint32    `json:"end"`
+	Extra  string    `json:"extra"`
 }

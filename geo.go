@@ -1,4 +1,4 @@
-package main
+package tracker
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func getGeoInfo(ip string) (*GeoInfo, error) {
+func GetGeoInfo(ip string) (*GeoInfo, error) {
 	// leafcloudhq/echoip docker container
 	req, err := http.NewRequest("GET", "http://localhost:8080/json?ip="+ip, nil)
 	if err != nil {
@@ -26,7 +26,7 @@ func getGeoInfo(ip string) (*GeoInfo, error) {
 	return &info, err
 }
 
-func ipFromRequest(headers []string, r *http.Request) (net.IP, error) {
+func IPFromRequest(headers []string, r *http.Request, forceIP string) (net.IP, error) {
 	// try to get IP from HTTP headers
 	// if nothing, get the RemoteAddr
 	remoteIP := ""
@@ -51,6 +51,7 @@ func ipFromRequest(headers []string, r *http.Request) (net.IP, error) {
 	if len(forceIP) > 0 {
 		remoteIP = forceIP
 	}
+
 	ip := net.ParseIP(remoteIP)
 	if ip == nil {
 		return nil, fmt.Errorf("could not parse IP: %s", remoteIP)

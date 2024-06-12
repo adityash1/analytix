@@ -40,11 +40,11 @@ type Events struct {
 func (e *Events) Open() error {
 	ctx := context.Background()
 	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{"127.0.0.1:9000"},
+		Addr: []string{config.ClickHouseHost},
 		Auth: clickhouse.Auth{
-			Database: "default",
-			Username: "default",
-			Password: "",
+			Database: config.ClickHouseDB,
+			Username: config.ClickHouseUser,
+			Password: config.ClickHousePassword,
 		},
 		ClientInfo: clickhouse.ClientInfo{
 			Products: []struct {

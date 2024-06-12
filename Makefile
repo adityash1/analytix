@@ -1,3 +1,5 @@
+export $(shell sed 's/=.*//' .env)
+
 server:
 	@cd cmd/tracker && go build && ./tracker -ip 123.123.123.123
 

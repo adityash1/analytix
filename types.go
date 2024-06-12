@@ -41,3 +41,15 @@ type MetricData struct {
 	End    uint32    `json:"end"`
 	Extra  string    `json:"extra"`
 }
+
+type Config struct {
+	APIKey             string
+	EchoIPHost         string
+	ClickHouseHost     string
+	ClickHouseDB       string
+	ClickHouseUser     string
+	ClickHousePassword string
+
+	// Dashboard
+	GoTrackerHost string
+}

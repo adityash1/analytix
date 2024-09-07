@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 
 	"tracker"
 
@@ -16,24 +15,13 @@ import (
 )
 
 var (
-	sites   map[string]string
 	forceIP                 = ""
 	events  *tracker.Events = &tracker.Events{}
 )
 
-func loadSites() error {
-	b, err := os.ReadFile("sites.json")
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, &sites)
-}
-
 func main() {
 	flag.StringVar(&forceIP, "ip", "", "force IP for request, useful in local")
 	flag.Parse()
-
-	tracker.LoadConfig()
 
 	if err := events.Open(); err != nil {
 		log.Fatal(err)
@@ -57,13 +45,6 @@ func track(w http.ResponseWriter, r *http.Request) {
 		fmt.Print(err)
 	}
 
-	site, ok := sites[trk.SiteID]
-	if !ok {
-		return
-	}
-
-	trk.SiteID = site
-
 	ua := useragent.Parse(trk.Action.UserAgent)
 
 	headers := []string{"X-Forward-For", "X-Real-IP"}
@@ -86,10 +67,6 @@ func track(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if len(trk.Action.Identity) == 0 {
-		trk.Action.Identity = fmt.Sprintf("%s-%s", geoInfo.IP, trk.Action.UserAgent)
-	}
-
 	go events.Add(trk, ua, geoInfo)
 }
 
@@ -104,12 +81,6 @@ func decodeData(s string) (data tracker.Tracking, err error) {
 }
 
 func stats(w http.ResponseWriter, r *http.Request) {
-	key := r.Header.Get("X-API-KEY")
-	if key != tracker.GetConfig().APIKey {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	var data tracker.MetricData
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

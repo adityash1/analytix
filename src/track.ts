@@ -68,7 +68,6 @@ class Tracker {
   page(path: string) {
     this.track(path, "Page views");
   }
-
   private trackRequest(payload: TrackPayload) {
     const s = JSON.stringify(payload);
     const url = `http://localhost:9876/track?data=${btoa(s)}`;
@@ -116,6 +115,6 @@ class Tracker {
     () => {
       tracker.page(d.location.hash);
     },
-    false,
+    false
   );
 })(window, document);

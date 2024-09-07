@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -39,23 +40,23 @@ type Events struct {
 
 func (e *Events) Open() error {
 	ctx := context.Background()
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{config.ClickHouseHost},
-		Auth: clickhouse.Auth{
-			Database: config.ClickHouseDB,
-			Username: config.ClickHouseUser,
-			Password: config.ClickHousePassword,
-		},
-		ClientInfo: clickhouse.ClientInfo{
-			Products: []struct {
-				Name    string
-				Version string
-			}{
-				{Name: "an-example-go-client", Version: "0.1"},
-			},
-		},
 
-		Debug: false,
+	options := &clickhouse.Options{
+		Addr: []string{"127.0.0.1:9000"},
+		Auth: clickhouse.Auth{
+			Database: "default",
+			Username: "default",
+			Password: "",
+		},
+		DialContext: func(ctx context.Context, addr string) (net.Conn, error) {
+			// dialCount++
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", addr)
+		},
+		Debug: true,
+		Debugf: func(format string, v ...any) {
+			fmt.Printf(format+"\n", v...)
+		},
 		Settings: clickhouse.Settings{
 			"max_execution_time": 60,
 		},
@@ -69,13 +70,17 @@ func (e *Events) Open() error {
 		ConnOpenStrategy:     clickhouse.ConnOpenInOrder,
 		BlockBufferSize:      10,
 		MaxCompressionBuffer: 10240,
-		Debugf: func(format string, v ...interface{}) {
-			fmt.Printf(format, v)
+		ClientInfo: clickhouse.ClientInfo{ // optional, please see Client info section in the README.md
+			Products: []struct {
+				Name    string
+				Version string
+			}{
+				{Name: "analytics-go", Version: "0.1"},
+			},
 		},
-		// TLS: &tls.Config{
-		// 	InsecureSkipVerify: true,
-		// },
-	})
+	}
+
+	conn, err := clickhouse.Open(options)
 
 	if err != nil {
 		return err
@@ -92,7 +97,7 @@ func (e *Events) Open() error {
 }
 
 func (e *Events) EnsureTable() error {
-	qry := `
+	qry := `		
 		CREATE TABLE IF NOT EXISTS events (
 			site_id String NOT NULL,
 			occured_at UInt32 NOT NULL,
@@ -101,7 +106,7 @@ func (e *Events) EnsureTable() error {
 			event String NOT NULL,
 			category String NOT NULL,
 			referrer String NOT NULL,
-			Referrer_domain String NOT NULL,
+			referrer_domain String NOT NULL,
 			is_touch BOOLEAN NOT NULL,
 			browser_name String NOT NULL,
 			os_name String NOT NULL,
@@ -259,12 +264,12 @@ func (e *Events) GenQuery(data MetricData) string {
 		daily = false
 	case QueryUniqueVisitors:
 		field = "user_id"
-	case QueryReferrerHost:
-		field = "referrer_domain"
-		daily = false
 	case QueryReferrer:
 		field = "referrer"
 		where = "AND referrer_domain = $3 "
+		daily = false
+	case QueryReferrerHost:
+		field = "referrer_domain"
 		daily = false
 	case QueryBrowsers:
 		field = "browser_name"
@@ -295,7 +300,7 @@ func (e *Events) GenQuery(data MetricData) string {
 		WHERE site_id = $1
 		AND occured_at BETWEEN $2 AND $3
 		AND category = 'Page views'
-		%s
+		%s 
 		GROUP BY %s
 		ORDER BY 3 DESC;
 	`, field, where, field)

@@ -9,8 +9,7 @@ import (
 )
 
 func GetGeoInfo(ip string) (*GeoInfo, error) {
-	// leafcloudhq/echoip docker container
-	req, err := http.NewRequest("GET", config.EchoIPHost+"/json?ip="+ip, nil)
+	req, err := http.NewRequest("GET", "http://localhost:8080/json?ip="+ip, nil)
 	if err != nil {
 		return nil, err
 	}

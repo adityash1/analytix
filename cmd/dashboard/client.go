@@ -22,12 +22,14 @@ func getMetric(what tracker.QueryType) ([]tracker.Metric, error) {
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", "http://localhost:9876/stats", bytes.NewBuffer(b))
+	host := tracker.GetConfig().GoTrackerHost
+	req, err := http.NewRequest("POST", host+"/stats", bytes.NewBuffer(b))
 	if err != nil {
 		return nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-KEY", tracker.GetConfig().APIKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err

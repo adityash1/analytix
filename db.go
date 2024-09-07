@@ -42,11 +42,11 @@ func (e *Events) Open() error {
 	ctx := context.Background()
 
 	options := &clickhouse.Options{
-		Addr: []string{"127.0.0.1:9000"},
+		Addr: []string{config.ClickHouseHost},
 		Auth: clickhouse.Auth{
-			Database: "default",
-			Username: "default",
-			Password: "",
+			Database: config.ClickHouseDB,
+			Username: config.ClickHouseUser,
+			Password: config.ClickHousePassword,
 		},
 		DialContext: func(ctx context.Context, addr string) (net.Conn, error) {
 			// dialCount++

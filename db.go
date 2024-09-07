@@ -97,7 +97,7 @@ func (e *Events) Open() error {
 }
 
 func (e *Events) EnsureTable() error {
-	qry := `		
+	qry := `        
 		CREATE TABLE IF NOT EXISTS events (
 			site_id String NOT NULL,
 			occured_at UInt32 NOT NULL,
@@ -163,9 +163,7 @@ func (e *Events) Run() {
 func (e *Events) Insert() error {
 	var tmp []qdata
 	e.lock.Lock()
-	for _, qd := range e.q {
-		tmp = append(tmp, qd)
-	}
+	tmp = append(tmp, e.q...)
 
 	e.q = nil
 	e.lock.Unlock()

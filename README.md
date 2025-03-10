@@ -20,4 +20,4 @@ A lightweight analytics system with a JavaScript client and Go backend using Cli
 - **Deployment**: Docker Compose
 
 #### Data flow
-<img src="https://github.com/user-attachments/assets/bfc08833-4224-46b1-9feb-2dcf16cf65ba" width="500">
+<img src="https://github.com/user-attachments/assets/f619b843-2541-4334-826b-c7284fc73b68" width="500">

@@ -2,8 +2,9 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -36,11 +37,15 @@ type Events struct {
 	ch   chan qdata
 	lock sync.RWMutex
 	q    []qdata
+	wg   sync.WaitGroup
+	log  *slog.Logger
 }
 
 func (e *Events) Open() error {
-	ctx := context.Background()
+	// Use default logger set in main, or initialize one if needed standalone
+	e.log = slog.Default().With(slog.String("component", "Events"))
 
+	ctx := context.Background()
 	options := &clickhouse.Options{
 		Addr: []string{config.ClickHouseHost},
 		Auth: clickhouse.Auth{
@@ -48,14 +53,9 @@ func (e *Events) Open() error {
 			Username: config.ClickHouseUser,
 			Password: config.ClickHousePassword,
 		},
-		DialContext: func(ctx context.Context, addr string) (net.Conn, error) {
-			// dialCount++
-			var d net.Dialer
-			return d.DialContext(ctx, "tcp", addr)
-		},
 		Debug: true,
 		Debugf: func(format string, v ...any) {
-			fmt.Printf(format+"\n", v...)
+			e.log.Debug(fmt.Sprintf(format, v...))
 		},
 		Settings: clickhouse.Settings{
 			"max_execution_time": 60,
@@ -68,36 +68,41 @@ func (e *Events) Open() error {
 		MaxIdleConns:         5,
 		ConnMaxLifetime:      time.Duration(10) * time.Minute,
 		ConnOpenStrategy:     clickhouse.ConnOpenInOrder,
-		BlockBufferSize:      10,
+		BlockBufferSize:      10, // Adjust buffer sizes as needed
 		MaxCompressionBuffer: 10240,
-		ClientInfo: clickhouse.ClientInfo{ // optional, please see Client info section in the README.md
+		ClientInfo: clickhouse.ClientInfo{
 			Products: []struct {
 				Name    string
 				Version string
 			}{
-				{Name: "analytics-go", Version: "0.1"},
+				{Name: "analytics-go", Version: "0.2"},
 			},
 		},
 	}
 
 	conn, err := clickhouse.Open(options)
-
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open clickhouse connection: %w", err)
 	}
 
 	if err := conn.Ping(ctx); err != nil {
 		if exception, ok := err.(*clickhouse.Exception); ok {
-			fmt.Printf("Exception [%d] %s \n%s\n", exception.Code, exception.Message, exception.StackTrace)
+			e.log.Error("ClickHouse connection ping failed (exception)",
+				slog.Int("code", int(exception.Code)),
+				slog.String("message", exception.Message),
+				slog.String("stacktrace", exception.StackTrace))
+		} else {
+			e.log.Error("ClickHouse connection ping failed", slog.Any("error", err))
 		}
-		return err
+		return fmt.Errorf("clickhouse ping failed: %w", err)
 	}
 	e.DB = conn
+	e.log.Info("Successfully connected to ClickHouse")
 	return nil
 }
 
 func (e *Events) EnsureTable() error {
-	qry := `        
+	qry := `
 		CREATE TABLE IF NOT EXISTS events (
 			site_id String NOT NULL,
 			occured_at UInt32 NOT NULL,
@@ -119,87 +124,152 @@ func (e *Events) EnsureTable() error {
 		ORDER BY (site_id, occured_at);
 	`
 
-	ctx := context.Background()
-	return e.DB.Exec(ctx, qry)
+	ctx := context.Background() // Use background context for setup tasks
+	err := e.DB.Exec(ctx, qry)
+	if err != nil {
+		e.log.Error("Failed to execute EnsureTable query", slog.Any("error", err))
+		return fmt.Errorf("failed ensuring table: %w", err)
+	}
+	e.log.Debug("Events table ensured")
+	return nil
 }
 
-func (e *Events) Add(trk Tracking, ua useragent.UserAgent, geo *GeoInfo) {
-	e.ch <- qdata{trk, ua, geo}
+// Add now accepts a context and returns an error if the channel send fails (e.g., during shutdown)
+func (e *Events) Add(ctx context.Context, trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
+	// Handle nil geo gracefully if it occurs
+	if geo == nil {
+		geo = &GeoInfo{} // Use an empty struct to avoid nil pointer dereferences later
+	}
+	data := qdata{trk, ua, geo}
+
+	select {
+	case e.ch <- data:
+		return nil
+	case <-ctx.Done():
+		e.log.Warn("Failed to add event: context cancelled", slog.Any("error", ctx.Err()))
+		return ctx.Err()
+		// Optional: Add a default case with a short timeout if you want to handle buffer full scenario
+		// default:
+		//  e.log.Warn("Failed to add event: channel buffer might be full")
+		//  return errors.New("event channel buffer full or closed")
+	}
 }
 
-func (e *Events) Run() {
-	e.ch = make(chan qdata)
+// Run now accepts a context for cancellation
+func (e *Events) Run(ctx context.Context) {
+	e.wg.Add(1)       // Signal that the goroutine has started
+	defer e.wg.Done() // Signal completion when Run exits
 
-	timer := time.NewTimer(time.Second * 10)
+	e.ch = make(chan qdata, 100) // Increased buffer size for the channel
+	flushInterval := 10 * time.Second
+	maxBatchSize := 50 // Increased max batch size
+	timer := time.NewTimer(flushInterval)
+
+	e.log.Info("Event processor started", slog.Duration("flushInterval", flushInterval), slog.Int("maxBatchSize", maxBatchSize))
+
 	for {
 		select {
-		case data := <-e.ch:
+		case data, ok := <-e.ch:
+			if !ok {
+				// Channel closed, means we are shutting down and no more data will come
+				e.log.Info("Event channel closed, processing remaining buffered events before exit.")
+				e.flushQueue() // Final flush
+				return
+			}
+
 			e.lock.Lock()
 			e.q = append(e.q, data)
-			c := len(e.q)
+			currentSize := len(e.q)
 			e.lock.Unlock()
 
-			if c >= 15 {
-				if err := e.Insert(); err != nil {
-					fmt.Println("error while inserting data: ", err)
-				}
+			// Reset timer if we add an item, avoids unnecessary timed flush right after batch flush
+			if !timer.Stop() {
+				<-timer.C // Drain timer if Stop() returned false
 			}
+			timer.Reset(flushInterval)
+
+			if currentSize >= maxBatchSize {
+				e.log.Debug("Flushing due to batch size limit", slog.Int("size", currentSize))
+				e.flushQueue()
+			}
+
 		case <-timer.C:
-			timer.Reset(time.Second * 10)
+			e.log.Debug("Flushing due to timer")
+			e.flushQueue()
+			timer.Reset(flushInterval) // Reset timer after flush
 
-			e.lock.RLock()
-			c := len(e.q)
-			e.lock.RUnlock()
-
-			if c > 0 {
-				if err := e.Insert(); err != nil {
-					fmt.Println("error while inserting data: ", err)
-				}
+		case <-ctx.Done():
+			e.log.Info("Shutdown signal received, stopping event processor.", slog.Any("reason", ctx.Err()))
+			close(e.ch) // Close channel to signal no more adds
+			// Drain remaining items from channel if any were sent after context cancel but before close
+			// This might not be strictly necessary if Add checks context, but safer.
+			for data := range e.ch {
+				e.lock.Lock()
+				e.q = append(e.q, data)
+				e.lock.Unlock()
 			}
+			e.log.Info("Flushing final batch before exit.")
+			e.flushQueue() // Final flush after draining channel
+			return
 		}
 	}
 }
 
-func (e *Events) Insert() error {
-	var tmp []qdata
+// flushQueue extracts the current queue and calls Insert
+// should only be called from Run() or internally where lock is managed
+func (e *Events) flushQueue() {
 	e.lock.Lock()
-	tmp = append(tmp, e.q...)
-
-	e.q = nil
+	if len(e.q) == 0 {
+		e.lock.Unlock()
+		return // Nothing to flush
+	}
+	// Copy buffer to temporary slice to minimize lock time
+	tmp := make([]qdata, len(e.q))
+	copy(tmp, e.q)
+	e.q = e.q[:0] // Clear original slice while keeping capacity
 	e.lock.Unlock()
 
+	e.log.Debug("Attempting to insert batch", slog.Int("count", len(tmp)))
+	if err := e.Insert(tmp); err != nil {
+		e.log.Error("Error inserting event batch", slog.Any("error", err), slog.Int("failed_count", len(tmp)))
+		// Consider adding retry logic or dead-letter queue here for production
+	} else {
+		e.log.Debug("Successfully inserted batch", slog.Int("count", len(tmp)))
+	}
+}
+
+func (e *Events) Insert(batchData []qdata) error {
+	if len(batchData) == 0 {
+		return nil
+	}
+
+	// Use a background context for the insert itself, or potentially derive from a shutdown context if available
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second) // Timeout for batch insert
+	defer cancel()
+
+	// Note: Parameter placeholders ($1, $2, etc.) might depend on the specific driver version or settings.
+	// The clickhouse-go/v2 driver typically uses '?' for placeholders in PrepareBatch.
+	// Let's assume '?' based on common usage, adjust if your setup differs.
 	qry := `
 		INSERT INTO events
 		(
-			site_id,
-			occured_at,
-			type,
-			user_id,
-			event,
-			category,
-			referrer,
-			referrer_domain,
-			is_touch,
-			browser_name,
-			os_name,
-			device_type,
-			country,
-			region
+			site_id, occured_at, type, user_id, event, category,
+			referrer, referrer_domain, is_touch, browser_name, os_name,
+			device_type, country, region
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		)
 	`
 
-	ctx := context.Background()
 	batch, err := e.DB.PrepareBatch(ctx, qry)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
 
-	for _, qd := range tmp {
+	for _, qd := range batchData {
 		err := batch.Append(
 			qd.trk.SiteID,
-			TimeToInt(time.Now()),
+			TimeToInt(time.Now()), // Consider using occured_at from client if available/trustworthy
 			qd.trk.Action.Type,
 			qd.trk.Action.Identity,
 			qd.trk.Action.Event,
@@ -210,44 +280,74 @@ func (e *Events) Insert() error {
 			qd.ua.Name,
 			qd.ua.OS,
 			qd.ua.Device,
-			qd.geo.Country,
-			qd.geo.RegionName,
+			qd.geo.Country,    // Use Country from GeoInfo
+			qd.geo.RegionName, // Use RegionName from GeoInfo
 		)
-
 		if err != nil {
-			return err
+			// Abort maybe? Or just log and continue? For now, return error.
+			return fmt.Errorf("failed to append to batch: %w", err)
 		}
 	}
 
-	return batch.Send()
+	err = batch.Send()
+	if err != nil {
+		return fmt.Errorf("failed to send batch: %w", err)
+	}
+	return nil
 }
 
-func (e *Events) GetStats(data MetricData) ([]Metric, error) {
-	qry := e.GenQuery(data)
+// WaitFlush waits for the Run goroutine to finish processing.
+func (e *Events) WaitFlush() {
+	e.log.Debug("Waiting for event processor to flush and stop...")
+	e.wg.Wait() // Wait for Run() goroutine to complete
+	e.log.Debug("Event processor finished.")
+}
+
+// GetStats now accepts context
+func (e *Events) GetStats(ctx context.Context, data MetricData) ([]Metric, error) {
+	qry := e.GenQuery(data) // Assuming GenQuery exists and works
+
+	// Use the passed context for the query, potentially with a timeout
+	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second) // 15 second timeout for stats query
+	defer cancel()
 
 	rows, err := e.DB.Query(
-		context.Background(),
+		queryCtx,
 		qry,
 		data.SiteID,
 		data.Start,
 		data.End,
-		data.Extra,
+		data.Extra, // Ensure GenQuery handles this parameter safely
 	)
 	if err != nil {
-		return nil, err
+		// Check for context deadline exceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			e.log.Error("Stats query timed out", slog.Any("error", err))
+			return nil, fmt.Errorf("stats query timed out: %w", err)
+		}
+		e.log.Error("Error executing stats query", slog.Any("error", err))
+		return nil, fmt.Errorf("stats query failed: %w", err)
 	}
+	defer rows.Close()
 
 	var metrics []Metric
 	for rows.Next() {
 		var m Metric
+		// Assuming Metric struct fields match the query output order
 		if err := rows.Scan(&m.OccuredAt, &m.Value, &m.Count); err != nil {
-			return nil, err
+			e.log.Error("Error scanning stats row", slog.Any("error", err))
+			return nil, fmt.Errorf("failed scanning stats row: %w", err) // Return partial results? For now, fail.
 		}
-
 		metrics = append(metrics, m)
 	}
 
-	return metrics, rows.Err()
+	if err := rows.Err(); err != nil {
+		e.log.Error("Error after iterating stats rows", slog.Any("error", err))
+		return metrics, fmt.Errorf("error iterating stats rows: %w", err) // Return processed metrics + error
+	}
+
+	e.log.Debug("Successfully retrieved stats", slog.Int("count", len(metrics)))
+	return metrics, nil
 }
 
 func (e *Events) GenQuery(data MetricData) string {
@@ -303,3 +403,32 @@ func (e *Events) GenQuery(data MetricData) string {
 		ORDER BY 3 DESC;
 	`, field, where, field)
 }
+
+// GenQuery stub (assuming it exists)
+// func (e *Events) GenQuery(data MetricData) string {
+// 	// Replace with your actual query generation logic based on data.What, etc.
+// 	// IMPORTANT: Ensure data.Extra and other inputs are properly sanitized
+// 	// or parameterized if used directly in the query string to prevent SQL injection.
+// 	// For this example, let's assume a simple page view count query.
+// 	e.log.Debug("Generating query for stats", slog.Any("metricData", data))
+// 	switch data.What {
+// 	case QueryPageViews: // Assuming QueryPageViews is defined elsewhere
+// 		// Example: Count page views grouped by day
+// 		// WARNING: This is illustrative ONLY. Parameterize properly!
+// 		// Using placeholders assumes ClickHouse driver supports them here.
+// 		return fmt.Sprintf(`
+//             SELECT
+//                 toStartOfDay(fromUnixTimestamp(occured_at)) AS day_start,
+//                 type,
+//                 count(*) as count
+//             FROM events
+//             WHERE site_id = ? AND occured_at >= ? AND occured_at <= ? AND type = 'pageview'
+//             GROUP BY day_start, type
+//             ORDER BY day_start
+//         `)
+// 	default:
+// 		e.log.Warn("Unsupported query type requested", slog.Any("queryType", data.What))
+// 		// Return a default safe query or an empty string/error indicator
+// 		return "SELECT toUInt32(0), '', toUInt64(0) WHERE 0" // Empty result
+// 	}
+// }

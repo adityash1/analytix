@@ -10,25 +10,29 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"sync" // Import sync for identity simulation
 	"time"
 )
 
+// --- Structures (matching tracker/types.go and src/track.ts payload) ---
 type TrackingData struct {
-	Type          string `json:"type"`
-	Identity      string `json:"identity"` // Will be auto-generated if empty
+	Type          string `json:"type"` // "page" or "event"
+	Identity      string `json:"identity"`
 	UserAgent     string `json:"ua"`
 	Event         string `json:"event"`
 	Category      string `json:"category"`
 	Referrer      string `json:"referrer"`
-	ReferrerHost  string `json:"-"` // Ignored in JSON, filled by server
 	IsTouchDevice bool   `json:"isTouchDevice"`
-	OccuredAt     uint32 `json:"-"` // Ignored in JSON, set by server
+	// OccuredAt is set by the server
 }
 
 type Tracking struct {
 	SiteID string       `json:"site_id"`
 	Action TrackingData `json:"tracking"`
 }
+
+// --- ---
 
 var (
 	logger *slog.Logger
@@ -37,13 +41,23 @@ var (
 // --- Data Generation Helpers ---
 
 var sites = []string{"siteA", "siteB", "cool-blog", "news-corp"}
-var eventTypes = []string{"pageview", "click", "form_submit", "video_play"}
-var categories = map[string][]string{
-	"pageview":    {"/", "/about", "/contact", "/products/1", "/products/2", "/blog/post-1"},
-	"click":       {"cta_button", "nav_link", "footer_link", "product_image"},
-	"form_submit": {"contact_form", "newsletter_signup", "login_form"},
-	"video_play":  {"intro_video", "product_demo"},
+
+// Paths that tracker.page() would automatically track
+var pagePaths = []string{
+	"/", "/about", "/contact", "/products", "/products/1", "/products/2",
+	"/blog", "/blog/post-1", "/blog/post-2", "/pricing", "/features", "/docs",
+	// Simulate some hash changes
+	"/#section1", "/about#team", "/pricing#enterprise",
 }
+
+// Custom events that would require manual tracker.track() calls
+var customEvents = map[string][]string{ // category -> event names
+	"click":    {"cta_button", "nav_link", "footer_link", "product_image", "add_to_cart"},
+	"form":     {"contact_submit", "newsletter_signup", "login_attempt", "search_query"},
+	"video":    {"play", "pause", "complete"},
+	"download": {"whitepaper", "datasheet"},
+}
+
 var userAgents = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
@@ -51,16 +65,44 @@ var userAgents = []string{
 	"Mozilla/5.0 (Linux; Android 13; SM-G991U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Mobile Safari/537.36",
 	"Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
 }
+
+// External referrers only, plus direct visits
 var referrers = []string{
-	"https://www.google.com/",
-	"https://www.bing.com/",
-	"https://duckduckgo.com/",
-	"https://t.co/", // Twitter
-	"https://www.facebook.com/",
-	"", // Direct visit
-	"",
-	"https://news.ycombinator.com/",
+	"https://www.google.com/", "https://www.bing.com/", "https://duckduckgo.com/",
+	"https://t.co/", "https://www.facebook.com/", "https://news.ycombinator.com/",
+	"https://www.reddit.com/", "https://github.com/",
+	"", "", "", "", "", // Higher chance of direct visit
 }
+
+// --- Identity Simulation ---
+// Simulate localStorage persistence for a subset of users
+var simulatedUserStorage = make(map[int]string) // Temporary "user id" -> persistent tracker id
+var storageMutex sync.Mutex
+
+const numSimulatedUsers = 500     // How many distinct users to simulate identities for
+const chanceOfReturningUser = 0.3 // 30% chance an event comes from a user with a stored ID
+
+func getSimulatedIdentity() string {
+	if rand.Float64() > chanceOfReturningUser {
+		return "" // New user or user without stored ID
+	}
+
+	// Simulate a returning user
+	tempUserID := rand.Intn(numSimulatedUsers)
+
+	storageMutex.Lock()
+	defer storageMutex.Unlock()
+
+	persistentID, exists := simulatedUserStorage[tempUserID]
+	if !exists {
+		// First time we see this simulated user, give them a persistent ID
+		persistentID = fmt.Sprintf("uid-%d-%d", tempUserID, rand.Intn(1000000))
+		simulatedUserStorage[tempUserID] = persistentID
+	}
+	return persistentID
+}
+
+// --- ---
 
 func randomElement(slice []string) string {
 	if len(slice) == 0 {
@@ -71,50 +113,76 @@ func randomElement(slice []string) string {
 
 func generateEvent() Tracking {
 	site := randomElement(sites)
-	eventType := randomElement(eventTypes)
-	category := ""
-	possibleCategories := categories[eventType]
-	if len(possibleCategories) > 0 {
-		category = randomElement(possibleCategories)
+	identity := getSimulatedIdentity() // Get potentially empty or persistent ID
+	userAgent := randomElement(userAgents)
+	isTouch := strings.Contains(userAgent, "iPhone") || strings.Contains(userAgent, "Android") || rand.Intn(20) == 0 // Simple UA check + random chance
+	referrer := randomElement(referrers)
+
+	var eventType, eventName, category string
+
+	// Decide whether to generate a page view (automatic) or a custom event (manual)
+	// Make page views much more common (e.g., 85% chance)
+	if rand.Intn(100) < 85 {
+		// --- Generate a Page View event (like tracker.page()) ---
+		eventType = "page"
+		category = "Page views"
+		eventName = randomElement(pagePaths)
+	} else {
+		// --- Generate a Custom Event (like tracker.track()) ---
+		eventType = "event"
+		// Pick a random custom category
+		customCategories := make([]string, 0, len(customEvents))
+		for cat := range customEvents {
+			customCategories = append(customCategories, cat)
+		}
+		if len(customCategories) == 0 { // Fallback if customEvents is empty
+			category = "general"
+			eventName = "fallback_event"
+		} else {
+			category = randomElement(customCategories)
+			possibleEvents := customEvents[category]
+			if len(possibleEvents) > 0 {
+				eventName = randomElement(possibleEvents)
+			} else {
+				eventName = category + "_fallback" // Fallback event name
+			}
+		}
 	}
-
-	// For pageviews, event name is usually the path
-	eventName := category
-	if eventType != "pageview" {
-		eventName = eventType + "_" + category // Simple event name
-	}
-
-	// Simulate ~10% touch devices
-	isTouch := rand.Intn(10) == 0
-
-	// Generate a somewhat unique identity stub (server completes it with IP)
-	identityStub := fmt.Sprintf("user-%d", rand.Intn(1000)) // Simulate ~1000 unique users
 
 	return Tracking{
 		SiteID: site,
 		Action: TrackingData{
 			Type:          eventType,
-			Identity:      identityStub, // Server uses this + IP if provided
-			UserAgent:     randomElement(userAgents),
+			Identity:      identity,
+			UserAgent:     userAgent,
 			Event:         eventName,
 			Category:      category,
-			Referrer:      randomElement(referrers),
+			Referrer:      referrer,
 			IsTouchDevice: isTouch,
 		},
 	}
 }
 
+// --- ---
+
 func main() {
 	// --- Logger Setup ---
-	logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logLevel := new(slog.LevelVar) // Default to Info
+	logLevel.Set(slog.LevelInfo)
+	logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 	// --- ---
 
 	// --- Flags ---
 	trackerURL := flag.String("url", "http://localhost:9876/track", "Tracker /track endpoint URL")
-	numEvents := flag.Int("n", 100, "Number of events to send")
-	delayMs := flag.Int("delay", 100, "Delay between requests in milliseconds")
+	numEvents := flag.Int("n", 500, "Number of events to send")                // Increased default
+	delayMs := flag.Int("delay", 50, "Delay between requests in milliseconds") // Decreased default
+	verbose := flag.Bool("v", false, "Enable debug logging")
 	flag.Parse()
+
+	if *verbose {
+		logLevel.Set(slog.LevelDebug)
+	}
 	// --- ---
 
 	rand.New(rand.NewSource(time.Now().UnixNano())) // Seed random number generator
@@ -147,7 +215,7 @@ func main() {
 		target, err := url.Parse(*trackerURL)
 		if err != nil {
 			logger.Error("Invalid tracker URL provided", slog.String("url", *trackerURL), slog.Any("error", err))
-			return // Fatal error if URL is bad
+			os.Exit(1) // Fatal error if URL is bad
 		}
 		query := target.Query()
 		query.Set("data", encodedData)
@@ -159,25 +227,32 @@ func main() {
 			errorCount++
 			continue
 		}
-		// Optional: Add headers if needed, e.g., req.Header.Add("User-Agent", "DataGenerator/1.0")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			logger.Error("Failed to send request to tracker", slog.Any("error", err), slog.Int("eventIndex", i))
+			logger.Error("Failed to send request to tracker", slog.Any("error", err), slog.Int("eventIndex", i), slog.String("url", target.String()))
 			errorCount++
 		} else {
+			logAttrs := []slog.Attr{
+				slog.Int("eventIndex", i),
+				slog.String("siteId", event.SiteID),
+				slog.String("type", event.Action.Type),
+				slog.String("category", event.Action.Category),
+				slog.String("event", event.Action.Event),
+				slog.String("identity", event.Action.Identity), // Log identity being sent
+			}
 			if resp.StatusCode == http.StatusOK {
-				logger.Debug("Event sent successfully", slog.Int("eventIndex", i), slog.String("siteId", event.SiteID), slog.String("type", event.Action.Type))
+				logger.LogAttrs(nil, slog.LevelDebug, "Event sent successfully", logAttrs...)
 				successCount++
 			} else {
-				logger.Warn("Tracker responded with non-OK status", slog.Int("statusCode", resp.StatusCode), slog.Int("eventIndex", i))
-				// You might want to read resp.Body here for more details in case of errors
+				logAttrs = append(logAttrs, slog.Int("statusCode", resp.StatusCode))
+				logger.LogAttrs(nil, slog.LevelWarn, "Tracker responded with non-OK status", logAttrs...)
 				errorCount++
 			}
-			resp.Body.Close() // Important to close the body
+			resp.Body.Close()
 		}
 
-		if i < *numEvents-1 {
+		if i < *numEvents-1 && delay > 0 {
 			time.Sleep(delay)
 		}
 	}
@@ -185,4 +260,8 @@ func main() {
 	logger.Info("Data generation complete",
 		slog.Int("successCount", successCount),
 		slog.Int("errorCount", errorCount))
+
+	if errorCount > 0 {
+		os.Exit(1)
+	}
 }

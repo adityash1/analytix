@@ -26,16 +26,33 @@ var (
 	logger  *slog.Logger
 )
 
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set allowed origin. Be more restrictive in production!
+		allowedOrigin := "http://localhost:5173" // Or get from config/env
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-KEY")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Call the next handler in the chain
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	flag.StringVar(&forceIP, "ip", "", "force IP for request, useful in local")
 	flag.Parse()
 
-	// --- Setup Logger ---
 	// Use TextHandler for development (more readable), JSONHandler for production
 	// logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)
-	// --------------------
 
 	// loadSites()
 	tracker.LoadConfig()
@@ -52,16 +69,16 @@ func main() {
 	eventsCtx, eventsCancel := context.WithCancel(context.Background()) // Context for event processor
 	go events.Run(eventsCtx)
 
-	// --- Setup HTTP Server ---
 	mux := http.NewServeMux()
 	mux.HandleFunc("/track", track)
 	mux.HandleFunc("/stats", stats)
 
+	corsHandler := corsMiddleware(mux)
+
 	server := &http.Server{
 		Addr:    ":9876",
-		Handler: mux,
+		Handler: corsHandler,
 	}
-	// -------------------------
 
 	// --- Graceful Shutdown Logic ---
 	stopChan := make(chan os.Signal, 1)
@@ -98,7 +115,6 @@ func main() {
 	logger.Info("Event processor stopped.")
 
 	logger.Info("Shutdown complete.")
-	// ---------------------------
 }
 
 func track(w http.ResponseWriter, r *http.Request) {
@@ -165,12 +181,12 @@ func track(w http.ResponseWriter, r *http.Request) {
 func decodeData(s string) (data tracker.Tracking, err error) {
 	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
-		return data, fmt.Errorf("base64 decode error: %w", err) // Wrap error
+		return data, fmt.Errorf("base64 decode error: %w", err)
 	}
 
 	err = json.Unmarshal(b, &data)
 	if err != nil {
-		return data, fmt.Errorf("json unmarshal error: %w", err) // Wrap error
+		return data, fmt.Errorf("json unmarshal error: %w", err)
 	}
 	return data, nil
 }

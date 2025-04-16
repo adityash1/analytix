@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,20 +26,26 @@ var (
 )
 
 func corsMiddleware(next http.Handler) http.Handler {
+	allowedOrigins := map[string]bool{
+		"http://localhost:5173": true,
+		"http://127.0.0.1:8081": true,
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set allowed origin. Be more restrictive in production!
-		allowedOrigin := "http://localhost:5173" // Or get from config/env
-		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		origin := r.Header.Get("Origin")
+		if allowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-KEY")
 
-		// Handle preflight requests
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// Call the next handler in the chain
 		next.ServeHTTP(w, r)
 	})
 }
@@ -54,7 +59,6 @@ func main() {
 	logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)
 
-	// loadSites()
 	tracker.LoadConfig()
 
 	if err := events.Open(); err != nil {
@@ -66,7 +70,7 @@ func main() {
 	}
 
 	// Start the event processing loop
-	eventsCtx, eventsCancel := context.WithCancel(context.Background()) // Context for event processor
+	eventsCtx, eventsCancel := context.WithCancel(context.Background())
 	go events.Run(eventsCtx)
 
 	mux := http.NewServeMux()
@@ -92,107 +96,97 @@ func main() {
 		}
 	}()
 
-	// Wait for shutdown signal
 	<-stopChan
 
 	logger.Info("Shutting down server...")
 
-	// Create a deadline context for shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second) // 30-second timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Shutdown the HTTP server gracefully
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP server shutdown failed", slog.Any("error", err))
 	}
 
-	// Signal the event processor to stop and flush
 	logger.Info("Stopping event processor...")
 	eventsCancel() // Signal Run() to stop accepting new events via context cancellation
 
-	// Wait for the event processor to flush remaining events (Requires modification in db.go)
-	events.WaitFlush() // We'll need to add this WaitFlush method to tracker.Events
+	events.WaitFlush()
 	logger.Info("Event processor stopped.")
 
 	logger.Info("Shutdown complete.")
 }
 
 func track(w http.ResponseWriter, r *http.Request) {
-	requestLogger := logger.With(slog.String("path", r.URL.Path)) // Add context to logs
+	requestLogger := logger.With(slog.String("path", r.URL.Path), slog.String("method", r.Method))
 
-	data := r.URL.Query().Get("data")
-	trk, err := decodeData(data)
-	if err != nil {
-		requestLogger.Error("Failed to decode tracking data", slog.Any("error", err), slog.String("rawData", data))
-		http.Error(w, "Bad Request: Invalid data format", http.StatusBadRequest)
+	var trk tracker.Tracking
+	var err error
+
+	if err := json.NewDecoder(r.Body).Decode(&trk); err != nil {
+		requestLogger.Error("Failed to decode tracking data from request body", slog.Any("error", err))
+		// Try to determine if the error is client-side (bad JSON) or server-side
+		var syntaxError *json.SyntaxError
+		var unmarshalTypeError *json.UnmarshalTypeError
+		if errors.As(err, &syntaxError) || errors.As(err, &unmarshalTypeError) {
+			http.Error(w, "Bad Request: Invalid JSON format", http.StatusBadRequest)
+		} else {
+			http.Error(w, "Internal Server Error: Could not read request body", http.StatusInternalServerError)
+		}
 		return
 	}
 
 	ua := useragent.Parse(trk.Action.UserAgent)
 
 	headers := []string{"X-Forward-For", "X-Real-IP"}
-	ip, err := tracker.IPFromRequest(headers, r, forceIP)
-	if err != nil {
-		// Log internal error, but don't expose details to client unless necessary
-		requestLogger.Error("Failed to get IP from request", slog.Any("error", err))
-		// Depending on requirements, you might still proceed or return an error
-		// For now, we'll proceed but log it. If GeoIP is critical, return 500 here.
+	ip, ipErr := tracker.IPFromRequest(headers, r, forceIP)
+	if ipErr != nil {
+		requestLogger.Error("Failed to get IP from request", slog.Any("error", ipErr))
+		// Continue processing even if IP fails
 	}
 
 	var geoInfo *tracker.GeoInfo
-	if ip == nil { // Only get GeoInfo if IP was found
+	if ip != nil {
 		geoInfo, err = tracker.GetGeoInfo(ip.String())
 		if err != nil {
-			// Log the error, but often tracking can proceed without geo-info
 			requestLogger.Warn("Failed to get geo info", slog.Any("error", err), slog.String("ip", ip.String()))
-			// Don't return an error to the client for non-critical geo failures
+			// Continue processing even if GeoIP fails
 		}
 	} else {
-		requestLogger.Warn("Skipping geo lookup due to missing IP")
+		requestLogger.Debug("Skipping geo lookup due to missing IP")
 	}
 
 	if len(trk.Action.Referrer) > 0 {
-		u, err := url.Parse(trk.Action.Referrer)
-		if err == nil {
+		u, parseErr := url.Parse(trk.Action.Referrer)
+		if parseErr == nil {
 			trk.Action.ReferrerHost = u.Host
 		} else {
-			requestLogger.Warn("Failed to parse referrer URL", slog.String("referrer", trk.Action.Referrer), slog.Any("error", err))
+			requestLogger.Warn("Failed to parse referrer URL", slog.String("referrer", trk.Action.Referrer), slog.Any("error", parseErr))
 		}
 	}
 
-	if len(trk.Action.Identity) == 0 && ip != nil { // Check ip is not nil before using
-		trk.Action.Identity = fmt.Sprintf("%s-%s", ip.String(), trk.Action.UserAgent)
-	} else if len(trk.Action.Identity) == 0 {
-		// Fallback if IP is also missing
-		trk.Action.Identity = fmt.Sprintf("unknown-%s", trk.Action.UserAgent)
+	if len(trk.Action.Identity) == 0 {
+		if ip != nil {
+			trk.Action.Identity = fmt.Sprintf("%s-%s", ip.String(), trk.Action.UserAgent)
+			requestLogger.Debug("Generated identity from IP and UserAgent", slog.String("identity", trk.Action.Identity))
+		} else {
+			trk.Action.Identity = fmt.Sprintf("unknown-%s", trk.Action.UserAgent)
+			requestLogger.Debug("Generated identity from 'unknown' and UserAgent", slog.String("identity", trk.Action.Identity))
+		}
 	}
 
 	// Send event for processing
-	if err := events.Add(r.Context(), trk, ua, geoInfo); err != nil { // Pass request context, handle error from Add
+	if err := events.Add(r.Context(), trk, ua, geoInfo); err != nil {
 		requestLogger.Error("Failed to add event to queue", slog.Any("error", err))
-		// Decide if this is a 500 (server issue) or 503 (service unavailable)
 		http.Error(w, "Internal Server Error: Could not process event", http.StatusInternalServerError)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK) // Send OK status *after* successfully adding
-}
-
-func decodeData(s string) (data tracker.Tracking, err error) {
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return data, fmt.Errorf("base64 decode error: %w", err)
-	}
-
-	err = json.Unmarshal(b, &data)
-	if err != nil {
-		return data, fmt.Errorf("json unmarshal error: %w", err)
-	}
-	return data, nil
+	w.WriteHeader(http.StatusOK)
+	requestLogger.Debug("Event tracked successfully")
 }
 
 func stats(w http.ResponseWriter, r *http.Request) {
-	requestLogger := logger.With(slog.String("path", r.URL.Path)) // Add context to logs
+	requestLogger := logger.With(slog.String("path", r.URL.Path))
 
 	key := r.Header.Get("X-API-KEY")
 	if key != tracker.GetConfig().APIKey {
@@ -209,18 +203,16 @@ func stats(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// Pass request context to GetStats
 	metrics, err := events.GetStats(r.Context(), data)
 	if err != nil {
 		requestLogger.Error("Failed to get stats from database", slog.Any("error", err))
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError) // Avoid leaking DB errors
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(metrics); err != nil { // Use encoder for efficiency
+	if err := json.NewEncoder(w).Encode(metrics); err != nil {
 		requestLogger.Error("Failed to encode stats response", slog.Any("error", err))
-		// Don't write further errors if headers are already sent
 		return
 	}
 }

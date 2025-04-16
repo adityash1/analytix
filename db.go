@@ -42,7 +42,7 @@ type Events struct {
 }
 
 func (e *Events) Open() error {
-	// Use default logger set in main, or initialize one if needed standalone
+	// Use default logger set in main
 	e.log = slog.Default().With(slog.String("component", "Events"))
 
 	ctx := context.Background()
@@ -68,7 +68,7 @@ func (e *Events) Open() error {
 		MaxIdleConns:         5,
 		ConnMaxLifetime:      time.Duration(10) * time.Minute,
 		ConnOpenStrategy:     clickhouse.ConnOpenInOrder,
-		BlockBufferSize:      10, // Adjust buffer sizes as needed
+		BlockBufferSize:      10,
 		MaxCompressionBuffer: 10240,
 		ClientInfo: clickhouse.ClientInfo{
 			Products: []struct {
@@ -124,7 +124,7 @@ func (e *Events) EnsureTable() error {
 		ORDER BY (site_id, occured_at);
 	`
 
-	ctx := context.Background() // Use background context for setup tasks
+	ctx := context.Background()
 	err := e.DB.Exec(ctx, qry)
 	if err != nil {
 		e.log.Error("Failed to execute EnsureTable query", slog.Any("error", err))
@@ -134,9 +134,7 @@ func (e *Events) EnsureTable() error {
 	return nil
 }
 
-// Add now accepts a context and returns an error if the channel send fails (e.g., during shutdown)
 func (e *Events) Add(ctx context.Context, trk Tracking, ua useragent.UserAgent, geo *GeoInfo) error {
-	// Handle nil geo gracefully if it occurs
 	if geo == nil {
 		geo = &GeoInfo{} // Use an empty struct to avoid nil pointer dereferences later
 	}
@@ -157,12 +155,12 @@ func (e *Events) Add(ctx context.Context, trk Tracking, ua useragent.UserAgent, 
 
 // Run now accepts a context for cancellation
 func (e *Events) Run(ctx context.Context) {
-	e.wg.Add(1)       // Signal that the goroutine has started
-	defer e.wg.Done() // Signal completion when Run exits
+	e.wg.Add(1)
+	defer e.wg.Done()
 
-	e.ch = make(chan qdata, 100) // Increased buffer size for the channel
+	e.ch = make(chan qdata, 100)
 	flushInterval := 10 * time.Second
-	maxBatchSize := 50 // Increased max batch size
+	maxBatchSize := 50
 	timer := time.NewTimer(flushInterval)
 
 	e.log.Info("Event processor started", slog.Duration("flushInterval", flushInterval), slog.Int("maxBatchSize", maxBatchSize))
@@ -244,12 +242,9 @@ func (e *Events) Insert(batchData []qdata) error {
 	}
 
 	// Use a background context for the insert itself, or potentially derive from a shutdown context if available
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second) // Timeout for batch insert
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	// Note: Parameter placeholders ($1, $2, etc.) might depend on the specific driver version or settings.
-	// The clickhouse-go/v2 driver typically uses '?' for placeholders in PrepareBatch.
-	// Let's assume '?' based on common usage, adjust if your setup differs.
 	qry := `
 		INSERT INTO events
 		(
@@ -280,8 +275,8 @@ func (e *Events) Insert(batchData []qdata) error {
 			qd.ua.Name,
 			qd.ua.OS,
 			qd.ua.Device,
-			qd.geo.Country,    // Use Country from GeoInfo
-			qd.geo.RegionName, // Use RegionName from GeoInfo
+			qd.geo.Country,
+			qd.geo.RegionName,
 		)
 		if err != nil {
 			// Abort maybe? Or just log and continue? For now, return error.
@@ -303,12 +298,10 @@ func (e *Events) WaitFlush() {
 	e.log.Debug("Event processor finished.")
 }
 
-// GetStats now accepts context
 func (e *Events) GetStats(ctx context.Context, data MetricData) ([]Metric, error) {
-	qry := e.GenQuery(data) // Assuming GenQuery exists and works
+	qry := e.GenQuery(data)
 
-	// Use the passed context for the query, potentially with a timeout
-	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second) // 15 second timeout for stats query
+	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	rows, err := e.DB.Query(
@@ -320,7 +313,6 @@ func (e *Events) GetStats(ctx context.Context, data MetricData) ([]Metric, error
 		data.Extra, // Ensure GenQuery handles this parameter safely
 	)
 	if err != nil {
-		// Check for context deadline exceeded
 		if errors.Is(err, context.DeadlineExceeded) {
 			e.log.Error("Stats query timed out", slog.Any("error", err))
 			return nil, fmt.Errorf("stats query timed out: %w", err)
@@ -403,32 +395,3 @@ func (e *Events) GenQuery(data MetricData) string {
 		ORDER BY 3 DESC;
 	`, field, where, field)
 }
-
-// GenQuery stub (assuming it exists)
-// func (e *Events) GenQuery(data MetricData) string {
-// 	// Replace with your actual query generation logic based on data.What, etc.
-// 	// IMPORTANT: Ensure data.Extra and other inputs are properly sanitized
-// 	// or parameterized if used directly in the query string to prevent SQL injection.
-// 	// For this example, let's assume a simple page view count query.
-// 	e.log.Debug("Generating query for stats", slog.Any("metricData", data))
-// 	switch data.What {
-// 	case QueryPageViews: // Assuming QueryPageViews is defined elsewhere
-// 		// Example: Count page views grouped by day
-// 		// WARNING: This is illustrative ONLY. Parameterize properly!
-// 		// Using placeholders assumes ClickHouse driver supports them here.
-// 		return fmt.Sprintf(`
-//             SELECT
-//                 toStartOfDay(fromUnixTimestamp(occured_at)) AS day_start,
-//                 type,
-//                 count(*) as count
-//             FROM events
-//             WHERE site_id = ? AND occured_at >= ? AND occured_at <= ? AND type = 'pageview'
-//             GROUP BY day_start, type
-//             ORDER BY day_start
-//         `)
-// 	default:
-// 		e.log.Warn("Unsupported query type requested", slog.Any("queryType", data.What))
-// 		// Return a default safe query or an empty string/error indicator
-// 		return "SELECT toUInt32(0), '', toUInt64(0) WHERE 0" // Empty result
-// 	}
-// }

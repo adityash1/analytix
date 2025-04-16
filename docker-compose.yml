@@ -1,11 +1,27 @@
-version: "3"
+version: "3.8"
 
 services:
-  db:
-    container_name: analytics-db
-    image: postgres:latest
+  echoip:
+    image: mpolden/echoip
+    container_name: echoip
     ports:
-      - 5432:5432
+      - "8080:8080"
+
+  clickhouse:
+    image: clickhouse
+    container_name: analytix-ch
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-password}
+      CLICKHOUSE_DEFAULT_DATABASE: ${CLICKHOUSE_DB:-default}
+    # Add volumes if you need persistence for ClickHouse data
+    # volumes:
+    #   - clickhouse_data:/var/lib/clickhouse
+# Define the volume if used
+# volumes:
+#   clickhouse_data:

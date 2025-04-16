@@ -69,11 +69,10 @@ class Tracker {
     this.track(path, "Page views");
   }
   private trackRequest(payload: TrackPayload) {
-    const s = JSON.stringify(payload);
-    const url = `http://localhost:9876/track?data=${btoa(s)}`;
-
-    const img = new Image();
-    img.src = url;
+    const blob = new Blob([JSON.stringify(payload)], {
+      type: "application/json",
+    });
+    navigator.sendBeacon("http://localhost:9876/track", blob);
   }
 }
 ((w, d) => {
